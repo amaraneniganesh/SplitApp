@@ -118,16 +118,15 @@ const Dashboard = () => {
            // Add to seen set immediately
            seenNotifIds.current.add(n._id);
            
-           // Trigger Sonner Toast
-           // We only toast if it's 'PENDING' to avoid spamming old stuff
+
            if (n.status === 'PENDING') {
              toast.success(n.message, { duration: 4000 });
            }
         });
       }
-      // Update state
+
       setNotifications(fetchedNotifs);
-      // -------------------------------------------
+
 
       if (activeGroupRef.current) {
          const histRes = await API.get(`/expenses/group/${activeGroupRef.current._id}`);
@@ -143,7 +142,7 @@ const Dashboard = () => {
     
     const init = async () => {
         setLoading(true);
-        // Pre-fill seenNotifIds on first load so we don't spam toasts for old existing notifs
+
         try {
           const res = await API.get(`/groups/notifications/${user.id}`);
           res.data.forEach(n => seenNotifIds.current.add(n._id));
