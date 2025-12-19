@@ -24,7 +24,7 @@ const AuthPage = () => {
     otp: ''
   });
 
-  const API = axios.create({ baseURL: 'https://splitappbend.onrender.com/api/auth' });
+  const API = axios.create({ baseURL: 'http://localhost:5000/api/auth' });
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });

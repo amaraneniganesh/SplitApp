@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Fragment, useCallback, useRef } from 'react';
+import React, { useState, useEffect, Fragment, useCallback, useRef, useMemo } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { Toaster, toast } from 'sonner';
@@ -18,9 +18,7 @@ import {
   HomeIcon,
   WalletIcon,
   ChevronDownIcon,
-  ChevronUpIcon,
   BellIcon,
-  UserIcon,
   CalculatorIcon,
   BackspaceIcon,
   Cog6ToothIcon,
@@ -52,11 +50,13 @@ const Dashboard = () => {
   
   // View States
   const [activeGroup, setActiveGroup] = useState(null);
-  const [groupHistory, setGroupHistory] = useState([]);
+  const [groupHistory, setGroupHistory] = useState([]); 
   const [expandedExpenseId, setExpandedExpenseId] = useState(null);
   
-  // Using Ref for activeGroup to access inside Interval without resetting it
+  // Ref to block auto-refresh during group switching
   const activeGroupRef = useRef(activeGroup);
+  const isSwitchingGroup = useRef(false);
+
   useEffect(() => { activeGroupRef.current = activeGroup; }, [activeGroup]);
 
   // Modals
@@ -90,11 +90,10 @@ const Dashboard = () => {
   const [calcInput, setCalcInput] = useState('');
   const [calcResult, setCalcResult] = useState('');
 
-  // --- DATA FETCHING ENGINE (AUTO-REFRESH) ---
-  
-  // 1. Core Fetch Function (Silent)
+  // --- 1. DATA FETCHING ENGINE (AUTO-REFRESH) ---
   const refreshData = async () => {
-    if (!user) return;
+    if (!user || isSwitchingGroup.current) return; 
+
     try {
       const [balanceRes, groupsRes, notifRes] = await Promise.all([
         API.get(`/expenses/balance/${user.id}`),
@@ -106,7 +105,6 @@ const Dashboard = () => {
       setMyGroups(groupsRes.data);
       setNotifications(notifRes.data);
 
-      // If inside a group, refresh its history too
       if (activeGroupRef.current) {
          const histRes = await API.get(`/expenses/group/${activeGroupRef.current._id}`);
          setGroupHistory(histRes.data);
@@ -116,7 +114,6 @@ const Dashboard = () => {
     }
   };
 
-  // 2. Initial Load
   useEffect(() => {
     if (!user) { navigate('/'); return; }
     const init = async () => {
@@ -126,7 +123,6 @@ const Dashboard = () => {
     };
     init();
 
-    // 3. Set Interval for Auto-Refresh (Every 3 Seconds)
     const interval = setInterval(refreshData, 3000);
     return () => clearInterval(interval);
   }, [user]);
@@ -149,23 +145,57 @@ const Dashboard = () => {
   const sendNotification = async (targetUserId, message) => {
     try {
       await API.post('/groups/notifications/create', {
-        userId: targetUserId,
-        message: message,
-        type: 'INFO', 
-        senderId: user.id
+        userId: targetUserId, message: message, type: 'INFO', senderId: user.id
       });
-      refreshData(); // Immediate refresh after sending
+      refreshData();
     } catch (err) { console.warn("Notif error", err); }
   };
 
-  // --- ACTIONS ---
+  // --- 2. CALCULATE LOCAL GROUP DEBTS ---
+  const groupDebts = useMemo(() => {
+    if (!activeGroup || !user || groupHistory.length === 0) return [];
+    let balances = {}; 
+    groupHistory.forEach(exp => {
+      if (!exp.payer || !exp.splits) return;
+      const payerId = exp.payer._id;
+      const amount = exp.amount;
+      if (exp.description !== 'Settlement') {
+        exp.splits.forEach(split => {
+           const debtorId = split.user?._id;
+           if (!debtorId || debtorId === payerId) return; 
+           const splitAmount = split.amount || 0;
+           if (payerId === user.id) { balances[debtorId] = (balances[debtorId] || 0) + splitAmount; }
+           else if (debtorId === user.id) { balances[payerId] = (balances[payerId] || 0) - splitAmount; }
+        });
+      } else {
+        const receiverId = exp.splits[0]?.user?._id;
+        if (!receiverId) return;
+        if (payerId === user.id) { balances[receiverId] = (balances[receiverId] || 0) + amount; }
+        else if (receiverId === user.id) { balances[payerId] = (balances[payerId] || 0) - amount; }
+      }
+    });
+    const debts = [];
+    Object.keys(balances).forEach(id => {
+       if (balances[id] < -0.01) { 
+         const member = activeGroup.members.find(m => m._id === id);
+         debts.push({ id: id, username: member ? member.username : 'Former Member', amount: Math.abs(balances[id]).toFixed(2) });
+       }
+    });
+    return debts;
+  }, [groupHistory, activeGroup, user]);
+
+
+  // --- 3. ACTIONS ---
   const handleGroupClick = async (group) => {
+    isSwitchingGroup.current = true; 
     setActiveGroup(group);
     setExpandedExpenseId(null);
+    setGroupHistory([]); 
     try {
       const res = await API.get(`/expenses/group/${group._id}`);
       setGroupHistory(res.data);
     } catch (err) { console.error(err); }
+    finally { setTimeout(() => { isSwitchingGroup.current = false; }, 500); }
   };
 
   const submitCreateGroup = async () => {
@@ -174,7 +204,7 @@ const Dashboard = () => {
       await API.post('/groups/create', { name: groupName, memberIds: selectedUsers.map(u => u._id), creatorId: user.id });
       toast.success(`Group "${groupName}" created!`);
       setCreateGroupOpen(false); setGroupName(''); setSelectedUsers([]); 
-      refreshData(); // Force Update
+      refreshData();
     } catch (err) { toast.error("Failed to create group"); }
   };
 
@@ -230,7 +260,10 @@ const Dashboard = () => {
 
       toast.success("Expense added");
       setExpenseOpen(false); setExpenseAmount(''); setExpenseDesc('');
-      refreshData(); // Force Update
+      
+      const res = await API.get(`/expenses/group/${activeGroup._id}`);
+      setGroupHistory(res.data);
+      refreshData();
     } catch (err) { toast.error("Failed to add"); }
   };
 
@@ -240,11 +273,16 @@ const Dashboard = () => {
     if(amount > maxSettleAmount) return toast.error(`Max amount is ₹${maxSettleAmount}`);
 
     try {
-      await API.post('/expenses/settle', { payer: user.id, receiver: settleReceiver, amount: amount, group: activeGroup._id });
+      await API.post('/expenses/settle', { 
+        payer: user.id, receiver: settleReceiver, amount: amount, group: activeGroup._id 
+      });
       await sendNotification(settleReceiver, `${user.username} settled ₹${amount}`);
       toast.success("Payment recorded");
       setSettleOpen(false);
-      refreshData(); // Force Update
+      
+      const res = await API.get(`/expenses/group/${activeGroup._id}`);
+      setGroupHistory(res.data);
+      refreshData(); 
     } catch (err) { toast.error("Failed"); }
   };
 
@@ -252,16 +290,54 @@ const Dashboard = () => {
     try { 
         await API.post('/groups/notifications/respond', { notificationId: id, response }); 
         toast.message(response === 'ACCEPTED' ? "Joined Group!" : "Ignored");
-        refreshData(); // Immediate refresh to show new group
+        refreshData(); 
     } catch (err) {}
   };
 
-  // ... (Keep existing UI helpers: openExpenseModal, handleSearch, handleCalcClick, getInitials, etc.) ...
-  const handleSettleChange = (receiverId) => { setSettleReceiver(receiverId); const debt = oweList.find(u => u.id === receiverId); if(debt) { setMaxSettleAmount(parseFloat(debt.amount)); setSettleAmount(debt.amount); } else { setMaxSettleAmount(0); setSettleAmount(''); } };
-  const openExpenseModal = (group) => { const target = group || activeGroup || myGroups[0]; if(!target) return toast.error("Select group"); setActiveGroup(target); setGroupMembers(target.members.map(m => ({ userId: m._id, username: m.username, value: '', isChecked: true }))); setExpenseOpen(true); };
-  const handleSearch = async (q) => { setSearchQuery(q); if (q.length > 1) { const res = await API.get(`/groups/search?query=${q}`); setSearchResults(res.data.filter(u => u._id !== user.id)); } else setSearchResults([]); };
-  const handleCalcClick = useCallback((val) => { if (val === 'C') { setCalcInput(''); setCalcResult(''); } else if (val === 'DEL') { setCalcInput(prev => prev.toString().slice(0, -1)); } else if (val === '=') { try { const res = eval(calcInput); setCalcResult(res.toString()); setCalcInput(res.toString()); } catch { setCalcResult('Error'); } } else { setCalcInput(prev => prev + val); } }, [calcInput]);
-  useEffect(() => { if (!isCalculatorOpen) return; const handleKeyDown = (e) => { const key = e.key; if (/[0-9.]/.test(key)) handleCalcClick(key); else if (['+', '-', '*', '/'].includes(key)) handleCalcClick(key); else if (key === 'Enter') { e.preventDefault(); handleCalcClick('='); } else if (key === 'Backspace') handleCalcClick('DEL'); else if (key === 'Escape' || key.toLowerCase() === 'c') handleCalcClick('C'); }; window.addEventListener('keydown', handleKeyDown); return () => window.removeEventListener('keydown', handleKeyDown); }, [isCalculatorOpen, handleCalcClick]);
+  const handleSettleChange = (receiverId) => { 
+    setSettleReceiver(receiverId); 
+    const debt = groupDebts.find(u => u.id === receiverId);
+    if(debt) { setMaxSettleAmount(parseFloat(debt.amount)); setSettleAmount(debt.amount); } 
+    else { setMaxSettleAmount(0); setSettleAmount(''); } 
+  };
+  
+  const openExpenseModal = (group) => { 
+    const target = group || activeGroup || myGroups[0]; 
+    if(!target) return toast.error("Select group"); 
+    setActiveGroup(target); 
+    setGroupMembers(target.members.map(m => ({ userId: m._id, username: m.username, value: '', isChecked: true }))); 
+    setExpenseOpen(true); 
+  };
+  
+  const handleSearch = async (q) => { 
+    setSearchQuery(q); 
+    if (q.length > 1) { 
+        const res = await API.get(`/groups/search?query=${q}`); 
+        setSearchResults(res.data.filter(u => u._id !== user.id)); 
+    } else setSearchResults([]); 
+  };
+  
+  const handleCalcClick = useCallback((val) => { 
+    if (val === 'C') { setCalcInput(''); setCalcResult(''); } 
+    else if (val === 'DEL') { setCalcInput(prev => prev.toString().slice(0, -1)); } 
+    else if (val === '=') { try { const res = eval(calcInput); setCalcResult(res.toString()); setCalcInput(res.toString()); } catch { setCalcResult('Error'); } } 
+    else { setCalcInput(prev => prev + val); } 
+  }, [calcInput]);
+  
+  useEffect(() => { 
+    if (!isCalculatorOpen) return; 
+    const handleKeyDown = (e) => { 
+        const key = e.key; 
+        if (/[0-9.]/.test(key)) handleCalcClick(key); 
+        else if (['+', '-', '*', '/'].includes(key)) handleCalcClick(key); 
+        else if (key === 'Enter') { e.preventDefault(); handleCalcClick('='); } 
+        else if (key === 'Backspace') handleCalcClick('DEL'); 
+        else if (key === 'Escape' || key.toLowerCase() === 'c') handleCalcClick('C'); 
+    }; 
+    window.addEventListener('keydown', handleKeyDown); 
+    return () => window.removeEventListener('keydown', handleKeyDown); 
+  }, [isCalculatorOpen, handleCalcClick]);
+
   const getInitials = (name) => name.substring(0, 2).toUpperCase();
   const getRandomColor = (id) => { const colors = ['bg-blue-100 text-blue-600', 'bg-emerald-100 text-emerald-600', 'bg-violet-100 text-violet-600', 'bg-amber-100 text-amber-600', 'bg-rose-100 text-rose-600']; return colors[id.charCodeAt(0) % colors.length]; };
   const isAdmin = activeGroup && ((activeGroup.creator && (activeGroup.creator._id === user.id || activeGroup.creator === user.id)) || (activeGroup.members && activeGroup.members.length > 0 && activeGroup.members[0]._id === user.id));
@@ -339,7 +415,14 @@ const Dashboard = () => {
       <div className="md:hidden flex flex-col h-full w-full relative bg-[#F8F9FA]">
         <div className={cn("flex flex-col h-full transition-all duration-500 ease-in-out", activeGroup ? 'opacity-0 pointer-events-none translate-x-[-20%]' : 'opacity-100 translate-x-0')}>
             <div className="p-6 pb-2 pt-8">
-               <div className="flex justify-between items-center mb-6"><div><h1 className="text-3xl font-black text-gray-900 tracking-tighter">Hello,</h1><h1 className="text-3xl font-black text-gray-400 tracking-tighter -mt-2">{user.username}</h1></div><button onClick={() => setInboxOpen(true)} className="relative p-3 bg-white rounded-2xl shadow-sm border border-gray-100"><BellIcon className="w-6 h-6 text-gray-700"/>{notifications.length > 0 && <span className="absolute top-2 right-3 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white"></span>}</button></div>
+               <div className="flex justify-between items-center mb-6">
+                  <div><h1 className="text-3xl font-black text-gray-900 tracking-tighter">Hello,</h1><h1 className="text-3xl font-black text-gray-400 tracking-tighter -mt-2">{user.username}</h1></div>
+                  {/* LOGOUT BUTTON ADDED HERE */}
+                  <div className="flex gap-3">
+                     <button onClick={() => {localStorage.clear(); navigate('/')}} className="p-3 bg-white rounded-2xl shadow-sm border border-gray-100 text-red-500 active:scale-95 transition-transform"><ArrowRightOnRectangleIcon className="w-6 h-6"/></button>
+                     <button onClick={() => setInboxOpen(true)} className="relative p-3 bg-white rounded-2xl shadow-sm border border-gray-100"><BellIcon className="w-6 h-6 text-gray-700"/>{notifications.length > 0 && <span className="absolute top-2 right-3 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white"></span>}</button>
+                  </div>
+               </div>
                <div onClick={() => setBalancesOpen(true)} className="w-full bg-black text-white p-6 rounded-[2rem] shadow-xl shadow-gray-200 mb-6 relative overflow-hidden cursor-pointer active:scale-95 transition-transform"><div className="absolute top-0 right-0 w-32 h-32 bg-gray-800 rounded-full mix-blend-overlay filter blur-2xl -mr-10 -mt-10"></div><div className="absolute bottom-0 left-0 w-24 h-24 bg-gray-700 rounded-full mix-blend-overlay filter blur-xl -ml-10 -mb-10"></div><div className="relative z-10 flex flex-col gap-6"><div className="flex justify-between items-start"><WalletIcon className="w-8 h-8 text-white/80"/><span className="px-3 py-1 bg-white/20 backdrop-blur-md rounded-lg text-xs font-bold tracking-widest uppercase flex items-center gap-1">Total Balance <ChevronDownIcon className="w-3 h-3"/></span></div><div className="flex gap-8"><div><p className="text-xs text-white/60 font-medium mb-1">You Owe</p><p className="text-2xl font-bold tracking-tight">₹{totalYouOwe}</p></div><div className="w-px bg-white/20 h-full"></div><div><p className="text-xs text-white/60 font-medium mb-1">Owed to You</p><p className="text-2xl font-bold tracking-tight text-emerald-400">₹{totalYouAreOwed}</p></div></div></div></div>
                <div className="relative z-10"><MagnifyingGlassIcon className="absolute left-4 top-3.5 w-5 h-5 text-gray-400" /><input type="text" placeholder="Search your groups..." className="w-full pl-12 pr-4 py-3 bg-white rounded-2xl text-sm font-bold shadow-sm border border-gray-100 focus:outline-none focus:ring-2 focus:ring-black/10 transition-all placeholder:font-medium placeholder:text-gray-400" /></div>
             </div>
@@ -368,7 +451,35 @@ const Dashboard = () => {
       <Modal isOpen={isBalancesOpen} onClose={() => setBalancesOpen(false)} title="My Debts"><div className="mt-2 space-y-6"><div><h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-3">You Owe</h4>{oweList.length === 0 ? <p className="text-sm text-gray-400 italic">You don't owe anyone.</p> : (<div className="space-y-3">{oweList.map(u => (<div key={u.id} className="flex justify-between items-center bg-red-50 p-3 rounded-xl border border-red-100"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center text-red-600 text-xs font-bold">{getInitials(u.username)}</div><span className="font-bold text-gray-800">{u.username}</span></div><span className="font-black text-red-500">₹{u.amount}</span></div>))}</div>)}</div><div><h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-3">Owed To You</h4>{owedList.length === 0 ? <p className="text-sm text-gray-400 italic">No one owes you.</p> : (<div className="space-y-3">{owedList.map(u => (<div key={u.id} className="flex justify-between items-center bg-teal-50 p-3 rounded-xl border border-teal-100"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-full bg-teal-100 flex items-center justify-center text-teal-600 text-xs font-bold">{getInitials(u.username)}</div><span className="font-bold text-gray-800">{u.username}</span></div><span className="font-black text-teal-600">₹{u.amount}</span></div>))}</div>)}</div></div></Modal>
       <Modal isOpen={isCreateGroupOpen} onClose={() => setCreateGroupOpen(false)} title="New Group"><div className="mt-4 space-y-4"><input className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-black" placeholder="Group Name" value={groupName} onChange={e => setGroupName(e.target.value)} /><div className="relative"><input className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-black" placeholder="Add members..." value={searchQuery} onChange={e => handleSearch(e.target.value)} />{searchResults.length > 0 && <div className="absolute w-full bg-white shadow-xl rounded-xl mt-2 max-h-48 overflow-y-auto z-50 border border-gray-100 p-1">{searchResults.map(u => <div key={u._id} onClick={() => { setSelectedUsers([...selectedUsers, u]); setSearchResults([]); setSearchQuery(''); }} className="p-2 hover:bg-gray-50 rounded-lg cursor-pointer text-sm font-bold text-gray-700">{u.username}</div>)}</div>}</div><div className="flex flex-wrap gap-2 min-h-[30px]">{selectedUsers.map(u => <span key={u._id} className="bg-black text-white text-xs font-bold px-2 py-1 rounded-lg flex items-center gap-2">{u.username} <button onClick={() => setSelectedUsers(selectedUsers.filter(s => s._id !== u._id))}>×</button></span>)}</div><button onClick={submitCreateGroup} className="w-full bg-black text-white py-3 rounded-xl font-bold text-sm hover:bg-gray-800 shadow-lg">Create Group</button></div></Modal>
       <Modal isOpen={isExpenseOpen} onClose={() => setExpenseOpen(false)} title="Add Expense"><div className="mt-4 space-y-4"><input className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-black" placeholder="Description" value={expenseDesc} onChange={e => setExpenseDesc(e.target.value)} /><div className="relative"><span className="absolute left-3 top-3 text-gray-400 font-bold">₹</span><input type="number" className="w-full p-3 pl-7 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-black" placeholder="0.00" value={expenseAmount} onChange={e => setExpenseAmount(e.target.value)} /></div><div className="flex bg-gray-100 p-1 rounded-xl">{['EQUAL', 'EXACT', 'PERCENTAGE'].map(t => <button key={t} onClick={() => setSplitType(t)} className={cn("flex-1 py-2 text-[10px] font-black rounded-lg transition-all", splitType === t ? "bg-white text-black shadow-sm" : "text-gray-400")}>{t}</button>)}</div><div className="max-h-40 overflow-y-auto border border-gray-200 rounded-xl p-2 space-y-2 custom-scrollbar">{groupMembers.map((m, i) => <div key={m.userId} className="flex justify-between items-center p-2 hover:bg-gray-50 rounded-lg"><span className="text-sm font-bold text-gray-700">{m.username}</span>{splitType === 'EQUAL' && <input type="checkbox" className="w-5 h-5 rounded text-black focus:ring-black" checked={m.isChecked} onChange={e => { const l=[...groupMembers]; l[i].isChecked=e.target.checked; setGroupMembers(l); }} />}{splitType !== 'EQUAL' && <input className="w-16 p-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-right outline-none focus:ring-1 focus:ring-black" placeholder="0" onChange={e => { const l=[...groupMembers]; l[i].value=e.target.value; setGroupMembers(l); }} />}</div>)}</div><button onClick={handleExpenseSubmit} className="w-full bg-black text-white py-3 rounded-xl font-bold text-sm hover:bg-gray-800 shadow-lg">Save Expense</button></div></Modal>
-      <Modal isOpen={isSettleOpen} onClose={() => setSettleOpen(false)} title="Settle Up"><div className="mt-4 space-y-4"><div><label className="text-xs font-bold text-gray-400 uppercase ml-1">Pay To</label><select className="w-full mt-1 p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-black" onChange={e => handleSettleChange(e.target.value)} value={settleReceiver}><option value="">Select Friend...</option>{oweList.map(u => <option key={u.id} value={u.id}>{u.username} (Owe ₹{u.amount})</option>)}</select></div><div><label className="text-xs font-bold text-gray-400 uppercase ml-1">Amount</label><input type="number" max={maxSettleAmount} className="w-full mt-1 p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-black" placeholder="₹ 0.00" value={settleAmount} onChange={e => setSettleAmount(e.target.value)} /></div><button onClick={handleSettleSubmit} className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-lg shadow-emerald-200">Confirm Payment</button></div></Modal>
+      
+      {/* Settle Modal with FILTERED Dropdown */}
+      <Modal isOpen={isSettleOpen} onClose={() => setSettleOpen(false)} title="Settle Up">
+        <div className="mt-4 space-y-4">
+          <div>
+            <label className="text-xs font-bold text-gray-400 uppercase ml-1">Pay To</label>
+            <select 
+              className="w-full mt-1 p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-black" 
+              onChange={e => handleSettleChange(e.target.value)} 
+              value={settleReceiver}
+            >
+              <option value="">Select Friend...</option>
+              {groupDebts.length > 0 ? (
+                groupDebts.map(u => (
+                  <option key={u.id} value={u.id}>{u.username} (Owe ₹{u.amount})</option>
+                ))
+              ) : (
+                <option disabled>No debts in this group</option>
+              )}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-bold text-gray-400 uppercase ml-1">Amount</label>
+            <input type="number" max={maxSettleAmount} className="w-full mt-1 p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-black" placeholder="₹ 0.00" value={settleAmount} onChange={e => setSettleAmount(e.target.value)} />
+          </div>
+          <button onClick={handleSettleSubmit} className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-lg shadow-emerald-200">Confirm Payment</button>
+        </div>
+      </Modal>
+
       <Modal isOpen={isHistoryOpen} onClose={() => setHistoryOpen(false)} title="Your Activity"><div className="mt-4 space-y-3 max-h-[500px] overflow-y-auto pr-2">{relevantHistory.length === 0 ? <p className="text-center text-gray-400 py-4 text-sm">No recent activity for you.</p> : relevantHistory.map(exp => (<div key={exp._id} className="flex justify-between items-center p-3 hover:bg-gray-50 rounded-xl transition-colors border border-transparent hover:border-gray-100"><div className="flex items-center gap-3"><div className={`p-2.5 rounded-xl ${exp.payer._id === user.id ? 'bg-black text-white' : 'bg-gray-100 text-gray-500'}`}>{exp.description === 'Settlement' ? <CheckCircleIcon className="w-5 h-5"/> : <BanknotesIcon className="w-5 h-5"/>}</div><div><p className="text-sm font-bold text-gray-800">{exp.description}</p><p className="text-[10px] font-bold text-gray-400">{new Date(exp.createdAt).toLocaleDateString()} • {exp.group?.name || 'Group'}</p></div></div><div className="text-right">{exp.payer._id === user.id ? (<p className="text-sm font-black text-gray-900">You paid ₹{(exp.amount || 0).toFixed(2)}</p>) : (<><p className="text-[10px] font-bold text-gray-400">{exp.payer.username} paid ₹{(exp.amount || 0).toFixed(2)}</p><p className="text-sm font-black text-red-500">You owe ₹{(exp.splits.find(s => s.user && s.user._id === user.id)?.amount || 0).toFixed(2)}</p></>)}</div></div>))}</div></Modal>
       <Modal isOpen={isInboxOpen} onClose={() => setInboxOpen(false)} title="Inbox"><div className="space-y-2 max-h-80 overflow-y-auto">{notifications.length === 0 ? <p className="text-center text-gray-400 py-4 text-sm">No new notifications.</p> : notifications.map(n => (<div key={n._id} className="p-3 bg-gray-50 border border-gray-100 rounded-xl flex justify-between items-center hover:bg-gray-100 transition-colors"><p className="text-xs font-bold text-gray-600">{n.message}</p><div className="flex gap-2"><button onClick={() => handleInviteResponse(n._id, 'ACCEPTED')} className="p-1.5 bg-green-200 text-green-800 rounded-lg"><CheckCircleIcon className="w-4 h-4"/></button><button onClick={() => handleInviteResponse(n._id, 'REJECTED')} className="p-1.5 bg-red-200 text-red-800 rounded-lg"><XCircleIcon className="w-4 h-4"/></button></div></div>))}</div></Modal>
     </div>
