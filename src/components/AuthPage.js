@@ -109,7 +109,7 @@ const AuthPage = () => {
       {/* --- LEFT SIDE: FORM --- */}
       <div className="w-full lg:w-1/2 h-full flex flex-col justify-center items-center p-8 lg:p-24 relative z-10">
         <div className="absolute top-10 left-10 lg:left-20 flex items-center gap-2">
-          <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center text-white font-black text-lg">S.</div>
+          <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center text-white font-black text-lg">S</div>
           <span className="font-bold text-xl tracking-tight">SplitApp</span>
         </div>
 
