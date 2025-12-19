@@ -13,7 +13,7 @@ import {
 
 const AuthPage = () => {
   const navigate = useNavigate();
-  const [view, setView] = useState('LOGIN'); 
+  const [view, setView] = useState('LOGIN'); // 'LOGIN', 'REGISTER', 'OTP'
   const [isLoading, setIsLoading] = useState(false);
 
   const [formData, setFormData] = useState({
@@ -24,15 +24,16 @@ const AuthPage = () => {
     otp: ''
   });
 
+  // Ensure this points to your deployed backend or localhost
   const API = axios.create({ baseURL: 'https://splitappbend.onrender.com/api/auth' });
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  // --- STRICT VALIDATION LOGIC ---
+  // --- VALIDATION LOGIC ---
   const validateInputs = () => {
-    // 1. Mobile Number (10 digits, starts with 6-9)
+    // 1. Mobile Number (10 digits, starts with 6-9) - Indian Standard
     if (view === 'REGISTER') {
         const phoneRegex = /^[6-9]\d{9}$/;
         if (!phoneRegex.test(formData.phone)) {
@@ -45,7 +46,7 @@ const AuthPage = () => {
     // >6 chars, 1 Uppercase, 1 Lowercase, 1 Digit, 1 Special Char
     const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{7,}$/;
     
-    if (!passwordRegex.test(formData.password)) {
+    if (view === 'REGISTER' && !passwordRegex.test(formData.password)) {
         toast.error("Weak Password! Use >6 chars, with Upper, Lower, Digit & Special char.");
         return false;
     }
@@ -54,49 +55,65 @@ const AuthPage = () => {
   };
 
   // --- ACTIONS ---
+  
+  // 1. REGISTER
   const handleRegister = async (e) => {
     e.preventDefault();
-    if (!validateInputs()) return; // Stop if validation fails
+    if (!validateInputs()) return;
 
     setIsLoading(true);
     try {
+      // Note: The route in your backend router is likely just '/' or '/register'
+      // Ensure this matches routes/authRoutes.js
       await API.post('/register', formData);
+      
       toast.success(`OTP Sent to ${formData.email}`);
       setView('OTP');
     } catch (err) {
-      toast.error(err.response?.data?.message || "Registration failed");
+      // Capture the specific error message from the backend
+      const errorMessage = err.response?.data?.message || "Registration failed";
+      toast.error(errorMessage);
     } finally {
       setIsLoading(false);
     }
   };
 
+  // 2. VERIFY OTP
   const handleVerifyOTP = async (e) => {
     e.preventDefault();
     setIsLoading(true);
     try {
       const res = await API.post('/verify-otp', { email: formData.email, otp: formData.otp });
+      
+      // Save Token & User Data
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
+      
       toast.success("Verified! Logging you in...");
       setTimeout(() => navigate('/dashboard'), 800);
     } catch (err) {
-      toast.error(err.response?.data?.message || "Invalid Code");
+      const errorMessage = err.response?.data?.message || "Invalid Code";
+      toast.error(errorMessage);
     } finally {
       setIsLoading(false);
     }
   };
 
+  // 3. LOGIN
   const handleLogin = async (e) => {
     e.preventDefault();
     setIsLoading(true);
     try {
       const res = await API.post('/login', { email: formData.email, password: formData.password });
+      
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
+      
       toast.success("Welcome back!");
       setTimeout(() => navigate('/dashboard'), 800);
     } catch (err) {
-      toast.error(err.response?.data?.message || "Invalid credentials");
+      const errorMessage = err.response?.data?.message || "Invalid credentials";
+      toast.error(errorMessage);
     } finally {
       setIsLoading(false);
     }
@@ -179,7 +196,7 @@ const AuthPage = () => {
         </div>
       </div>
 
-      {/* --- RIGHT SIDE --- */}
+      {/* --- RIGHT SIDE: GRAPHIC --- */}
       <div className="hidden lg:flex w-1/2 bg-black relative overflow-hidden items-center justify-center p-20">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-gray-800 via-black to-black opacity-80"></div>
         <div className="absolute -top-24 -right-24 w-96 h-96 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-blob"></div>
@@ -194,7 +211,18 @@ const AuthPage = () => {
   );
 };
 
-const InputGroup = ({ icon, ...props }) => (<div className="relative group"><div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-gray-400 group-focus-within:text-black transition-colors">{icon}</div><input className="w-full pl-11 pr-4 py-4 bg-gray-50 border border-transparent rounded-xl text-sm font-bold text-gray-900 placeholder:text-gray-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-gray-200 transition-all" {...props} required /></div>);
-const Button = ({ loading, text }) => (<button type="submit" disabled={loading} className="w-full bg-black text-white h-14 rounded-xl font-bold text-sm hover:bg-gray-900 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-xl shadow-gray-200 disabled:opacity-70 disabled:cursor-not-allowed">{loading ? (<div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>) : (<>{text} <ArrowRightIcon className="w-4 h-4 stroke-[3]"/></>)}</button>);
+// --- REUSABLE COMPONENTS ---
+const InputGroup = ({ icon, ...props }) => (
+  <div className="relative group">
+    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-gray-400 group-focus-within:text-black transition-colors">{icon}</div>
+    <input className="w-full pl-11 pr-4 py-4 bg-gray-50 border border-transparent rounded-xl text-sm font-bold text-gray-900 placeholder:text-gray-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-gray-200 transition-all" {...props} required />
+  </div>
+);
+
+const Button = ({ loading, text }) => (
+  <button type="submit" disabled={loading} className="w-full bg-black text-white h-14 rounded-xl font-bold text-sm hover:bg-gray-900 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-xl shadow-gray-200 disabled:opacity-70 disabled:cursor-not-allowed">
+    {loading ? (<div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>) : (<>{text} <ArrowRightIcon className="w-4 h-4 stroke-[3]"/></>)}
+  </button>
+);
 
 export default AuthPage;

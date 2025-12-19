@@ -56,6 +56,9 @@ const Dashboard = () => {
   // Ref to block auto-refresh during group switching
   const activeGroupRef = useRef(activeGroup);
   const isSwitchingGroup = useRef(false);
+  
+  // Ref to track notifications we have already alerted (Prevent duplicate toasts)
+  const seenNotifIds = useRef(new Set()); 
 
   useEffect(() => { activeGroupRef.current = activeGroup; }, [activeGroup]);
 
@@ -103,7 +106,28 @@ const Dashboard = () => {
       setOweList(balanceRes.data.oweList);
       setOwedList(balanceRes.data.owedList);
       setMyGroups(groupsRes.data);
-      setNotifications(notifRes.data);
+      
+      // --- REAL-TIME TOAST NOTIFICATION LOGIC ---
+      const fetchedNotifs = notifRes.data;
+      
+      // Filter strictly new notifications that we haven't seen in this session
+      const newAlerts = fetchedNotifs.filter(n => !seenNotifIds.current.has(n._id));
+      
+      if (newAlerts.length > 0) {
+        newAlerts.forEach(n => {
+           // Add to seen set immediately
+           seenNotifIds.current.add(n._id);
+           
+           // Trigger Sonner Toast
+           // We only toast if it's 'PENDING' to avoid spamming old stuff
+           if (n.status === 'PENDING') {
+             toast.success(n.message, { duration: 4000 });
+           }
+        });
+      }
+      // Update state
+      setNotifications(fetchedNotifs);
+      // -------------------------------------------
 
       if (activeGroupRef.current) {
          const histRes = await API.get(`/expenses/group/${activeGroupRef.current._id}`);
@@ -116,9 +140,18 @@ const Dashboard = () => {
 
   useEffect(() => {
     if (!user) { navigate('/'); return; }
+    
     const init = async () => {
         setLoading(true);
-        await refreshData();
+        // Pre-fill seenNotifIds on first load so we don't spam toasts for old existing notifs
+        try {
+          const res = await API.get(`/groups/notifications/${user.id}`);
+          res.data.forEach(n => seenNotifIds.current.add(n._id));
+          setNotifications(res.data);
+          
+          // Load other initial data
+          await refreshData();
+        } catch(e) {}
         setLoading(false);
     };
     init();
@@ -142,11 +175,14 @@ const Dashboard = () => {
     return exp.payer._id === user.id || exp.splits.some(s => s.user && s.user._id === user.id);
   });
 
+  // Updated to include toast for sender too (optional confirmation)
   const sendNotification = async (targetUserId, message) => {
     try {
       await API.post('/groups/notifications/create', {
         userId: targetUserId, message: message, type: 'INFO', senderId: user.id
       });
+      // Force refresh so I can see my own sent message logic if needed, 
+      // but mainly to update UI state
       refreshData();
     } catch (err) { console.warn("Notif error", err); }
   };
@@ -417,7 +453,7 @@ const Dashboard = () => {
             <div className="p-6 pb-2 pt-8">
                <div className="flex justify-between items-center mb-6">
                   <div><h1 className="text-3xl font-black text-gray-900 tracking-tighter">Hello,</h1><h1 className="text-3xl font-black text-gray-400 tracking-tighter -mt-2">{user.username}</h1></div>
-                  {/* LOGOUT BUTTON ADDED HERE */}
+                  {/* LOGOUT BUTTON */}
                   <div className="flex gap-3">
                      <button onClick={() => {localStorage.clear(); navigate('/')}} className="p-3 bg-white rounded-2xl shadow-sm border border-gray-100 text-red-500 active:scale-95 transition-transform"><ArrowRightOnRectangleIcon className="w-6 h-6"/></button>
                      <button onClick={() => setInboxOpen(true)} className="relative p-3 bg-white rounded-2xl shadow-sm border border-gray-100"><BellIcon className="w-6 h-6 text-gray-700"/>{notifications.length > 0 && <span className="absolute top-2 right-3 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white"></span>}</button>
