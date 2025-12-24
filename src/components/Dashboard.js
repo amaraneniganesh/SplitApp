@@ -22,7 +22,8 @@ import {
   CalculatorIcon,
   BackspaceIcon,
   Cog6ToothIcon,
-  TrashIcon
+  TrashIcon,
+  CheckIcon
 } from '@heroicons/react/24/outline';
 
 // Utility for class merging
@@ -118,15 +119,14 @@ const Dashboard = () => {
            // Add to seen set immediately
            seenNotifIds.current.add(n._id);
            
-
-           if (n.status === 'PENDING') {
-             toast.success(n.message, { duration: 4000 });
+           // Show toast for pending items or new info alerts
+           if (n.status === 'PENDING' || n.status === 'unread') {
+             toast.info(n.message, { duration: 4000 });
            }
         });
       }
 
       setNotifications(fetchedNotifs);
-
 
       if (activeGroupRef.current) {
          const histRes = await API.get(`/expenses/group/${activeGroupRef.current._id}`);
@@ -176,12 +176,12 @@ const Dashboard = () => {
 
   // Updated to include toast for sender too (optional confirmation)
   const sendNotification = async (targetUserId, message) => {
+    // This is now handled mostly by backend automatic triggers, 
+    // but kept here for manual invites if needed.
     try {
       await API.post('/groups/notifications/create', {
         userId: targetUserId, message: message, type: 'INFO', senderId: user.id
       });
-      // Force refresh so I can see my own sent message logic if needed, 
-      // but mainly to update UI state
       refreshData();
     } catch (err) { console.warn("Notif error", err); }
   };
@@ -284,15 +284,11 @@ const Dashboard = () => {
     }
 
     try {
+      // Backend now handles Email + Notification creation automatically
       await API.post('/expenses/add', {
         description: expenseDesc, amount: totalAmount, payer: user.id, group: activeGroup._id, splitType, splitData: finalSplits
       });
       
-      const notifPromises = involvedUserIds
-        .filter(id => id !== user.id)
-        .map(id => sendNotification(id, `${user.username} added expense: ${expenseDesc} (₹${totalAmount})`));
-      await Promise.allSettled(notifPromises);
-
       toast.success("Expense added");
       setExpenseOpen(false); setExpenseAmount(''); setExpenseDesc('');
       
@@ -308,10 +304,11 @@ const Dashboard = () => {
     if(amount > maxSettleAmount) return toast.error(`Max amount is ₹${maxSettleAmount}`);
 
     try {
+      // Backend now handles Email + Notification creation automatically
       await API.post('/expenses/settle', { 
         payer: user.id, receiver: settleReceiver, amount: amount, group: activeGroup._id 
       });
-      await sendNotification(settleReceiver, `${user.username} settled ₹${amount}`);
+      
       toast.success("Payment recorded");
       setSettleOpen(false);
       
@@ -321,10 +318,15 @@ const Dashboard = () => {
     } catch (err) { toast.error("Failed"); }
   };
 
+  // --- UPDATED RESPONSE HANDLER ---
   const handleInviteResponse = async (id, response) => {
     try { 
         await API.post('/groups/notifications/respond', { notificationId: id, response }); 
-        toast.message(response === 'ACCEPTED' ? "Joined Group!" : "Ignored");
+        
+        if (response === 'ACCEPTED') toast.success("Joined Group!");
+        else if (response === 'REJECTED') toast.info("Invite Rejected");
+        else if (response === 'READ') { /* Silent dismissal */ }
+        
         refreshData(); 
     } catch (err) {}
   };
@@ -471,11 +473,11 @@ const Dashboard = () => {
         </div>
         <div className={cn("fixed bottom-6 left-6 right-6 z-50 transition-transform duration-500", activeGroup ? "translate-y-[200%]" : "translate-y-0")}>
            <div className="bg-white/90 backdrop-blur-xl border border-white/50 shadow-[0_10px_40px_-10px_rgba(0,0,0,0.1)] rounded-[2rem] p-2 flex justify-between items-center px-6 ring-1 ring-black/5">
-               <button onClick={() => setActiveGroup(null)} className="flex flex-col items-center gap-1 p-2 text-black"><HomeIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">Home</span></button>
-               <button onClick={fetchGlobalHistory} className="flex flex-col items-center gap-1 p-2 text-gray-400 hover:text-black transition-colors"><ClockIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">History</span></button>
-               <button onClick={() => setCreateGroupOpen(true)} className="-mt-12 bg-black text-white p-4 rounded-full shadow-xl shadow-gray-400/50 border-[6px] border-[#F8F9FA] active:scale-90 transition-transform"><PlusIcon className="w-6 h-6"/></button>
-               <button onClick={() => setCalculatorOpen(true)} className="flex flex-col items-center gap-1 p-2 text-gray-400 hover:text-black transition-colors"><CalculatorIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">Calc</span></button>
-               <button onClick={() => setInboxOpen(true)} className="flex flex-col items-center gap-1 p-2 text-gray-400 hover:text-black transition-colors"><EnvelopeIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">Inbox</span></button>
+              <button onClick={() => setActiveGroup(null)} className="flex flex-col items-center gap-1 p-2 text-black"><HomeIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">Home</span></button>
+              <button onClick={fetchGlobalHistory} className="flex flex-col items-center gap-1 p-2 text-gray-400 hover:text-black transition-colors"><ClockIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">History</span></button>
+              <button onClick={() => setCreateGroupOpen(true)} className="-mt-12 bg-black text-white p-4 rounded-full shadow-xl shadow-gray-400/50 border-[6px] border-[#F8F9FA] active:scale-90 transition-transform"><PlusIcon className="w-6 h-6"/></button>
+              <button onClick={() => setCalculatorOpen(true)} className="flex flex-col items-center gap-1 p-2 text-gray-400 hover:text-black transition-colors"><CalculatorIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">Calc</span></button>
+              <button onClick={() => setInboxOpen(true)} className="flex flex-col items-center gap-1 p-2 text-gray-400 hover:text-black transition-colors"><EnvelopeIcon className="w-6 h-6 stroke-[2.5]"/><span className="text-[9px] font-bold">Inbox</span></button>
            </div>
         </div>
       </div>
@@ -516,7 +518,42 @@ const Dashboard = () => {
       </Modal>
 
       <Modal isOpen={isHistoryOpen} onClose={() => setHistoryOpen(false)} title="Your Activity"><div className="mt-4 space-y-3 max-h-[500px] overflow-y-auto pr-2">{relevantHistory.length === 0 ? <p className="text-center text-gray-400 py-4 text-sm">No recent activity for you.</p> : relevantHistory.map(exp => (<div key={exp._id} className="flex justify-between items-center p-3 hover:bg-gray-50 rounded-xl transition-colors border border-transparent hover:border-gray-100"><div className="flex items-center gap-3"><div className={`p-2.5 rounded-xl ${exp.payer._id === user.id ? 'bg-black text-white' : 'bg-gray-100 text-gray-500'}`}>{exp.description === 'Settlement' ? <CheckCircleIcon className="w-5 h-5"/> : <BanknotesIcon className="w-5 h-5"/>}</div><div><p className="text-sm font-bold text-gray-800">{exp.description}</p><p className="text-[10px] font-bold text-gray-400">{new Date(exp.createdAt).toLocaleDateString()} • {exp.group?.name || 'Group'}</p></div></div><div className="text-right">{exp.payer._id === user.id ? (<p className="text-sm font-black text-gray-900">You paid ₹{(exp.amount || 0).toFixed(2)}</p>) : (<><p className="text-[10px] font-bold text-gray-400">{exp.payer.username} paid ₹{(exp.amount || 0).toFixed(2)}</p><p className="text-sm font-black text-red-500">You owe ₹{(exp.splits.find(s => s.user && s.user._id === user.id)?.amount || 0).toFixed(2)}</p></>)}</div></div>))}</div></Modal>
-      <Modal isOpen={isInboxOpen} onClose={() => setInboxOpen(false)} title="Inbox"><div className="space-y-2 max-h-80 overflow-y-auto">{notifications.length === 0 ? <p className="text-center text-gray-400 py-4 text-sm">No new notifications.</p> : notifications.map(n => (<div key={n._id} className="p-3 bg-gray-50 border border-gray-100 rounded-xl flex justify-between items-center hover:bg-gray-100 transition-colors"><p className="text-xs font-bold text-gray-600">{n.message}</p><div className="flex gap-2"><button onClick={() => handleInviteResponse(n._id, 'ACCEPTED')} className="p-1.5 bg-green-200 text-green-800 rounded-lg"><CheckCircleIcon className="w-4 h-4"/></button><button onClick={() => handleInviteResponse(n._id, 'REJECTED')} className="p-1.5 bg-red-200 text-red-800 rounded-lg"><XCircleIcon className="w-4 h-4"/></button></div></div>))}</div></Modal>
+      
+      {/* UPDATED INBOX MODAL */}
+      <Modal isOpen={isInboxOpen} onClose={() => setInboxOpen(false)} title="Inbox">
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {notifications.length === 0 ? (
+              <p className="text-center text-gray-400 py-4 text-sm">No new notifications.</p>
+            ) : (
+              notifications.map(n => (
+                <div key={n._id} className="p-3 bg-gray-50 border border-gray-100 rounded-xl flex justify-between items-center hover:bg-gray-100 transition-colors">
+                  <div className="flex-1 pr-2">
+                     <p className="text-xs font-bold text-gray-700 leading-relaxed">{n.message}</p>
+                     <p className="text-[9px] text-gray-400 font-bold mt-1">{new Date(n.createdAt).toLocaleDateString()}</p>
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    {/* Only show Accept/Reject for Invites. For others, just show 'Mark as Read' */}
+                    {n.type === 'GROUP_INVITE' ? (
+                      <>
+                        <button onClick={() => handleInviteResponse(n._id, 'ACCEPTED')} className="p-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors" title="Join">
+                          <CheckCircleIcon className="w-5 h-5"/>
+                        </button>
+                        <button onClick={() => handleInviteResponse(n._id, 'REJECTED')} className="p-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 transition-colors" title="Reject">
+                          <XCircleIcon className="w-5 h-5"/>
+                        </button>
+                      </>
+                    ) : (
+                      <button onClick={() => handleInviteResponse(n._id, 'READ')} className="p-2 bg-gray-200 text-gray-500 rounded-lg hover:bg-gray-300 transition-colors" title="Dismiss">
+                        <CheckIcon className="w-5 h-5"/>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+      </Modal>
+
     </div>
   );
 };
